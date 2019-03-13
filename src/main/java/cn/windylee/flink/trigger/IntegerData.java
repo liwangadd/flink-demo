@@ -1,4 +1,4 @@
-package cn.windylee.flink;
+package cn.windylee.flink.trigger;
 
 import java.util.Random;
 

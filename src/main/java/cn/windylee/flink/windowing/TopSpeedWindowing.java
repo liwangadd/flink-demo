@@ -1,0 +1,116 @@
+package cn.windylee.flink.windowing;
+
+import org.apache.flink.api.common.functions.RichMapFunction;
+import org.apache.flink.api.java.tuple.Tuple4;
+import org.apache.flink.api.java.utils.ParameterTool;
+import org.apache.flink.streaming.api.TimeCharacteristic;
+import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.functions.source.SourceFunction;
+import org.apache.flink.streaming.api.functions.timestamps.AscendingTimestampExtractor;
+import org.apache.flink.streaming.api.functions.windowing.delta.DeltaFunction;
+import org.apache.flink.streaming.api.windowing.assigners.GlobalWindows;
+import org.apache.flink.streaming.api.windowing.evictors.TimeEvictor;
+import org.apache.flink.streaming.api.windowing.time.Time;
+import org.apache.flink.streaming.api.windowing.triggers.DeltaTrigger;
+
+import java.util.Arrays;
+import java.util.Random;
+import java.util.concurrent.TimeUnit;
+
+public class TopSpeedWindowing {
+
+    public static void main(String[] args) throws Exception {
+        ParameterTool params = ParameterTool.fromArgs(args);
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.createLocalEnvironment();
+        env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime);
+        env.getConfig().setGlobalJobParameters(params);
+        DataStream<Tuple4<Integer, Integer, Double, Long>> carData;
+        if (params.has("input")) {
+            carData = env.readTextFile(params.get("input")).map(new ParseCarData());
+        } else {
+            carData = env.addSource(CarSource.create(2));
+        }
+        int evictionSec = 10;
+        double triggerMeters = 50;
+        DataStream<Tuple4<Integer, Integer, Double, Long>> topSpeeds = carData.assignTimestampsAndWatermarks(new CarTimestamp())
+                .keyBy(0)
+                .window(GlobalWindows.create())
+                .evictor(TimeEvictor.of(Time.of(evictionSec, TimeUnit.SECONDS)))
+                .trigger(DeltaTrigger.of(triggerMeters, new DeltaFunction<Tuple4<Integer, Integer, Double, Long>>() {
+                    @Override
+                    public double getDelta(Tuple4<Integer, Integer, Double, Long> oldDataPoint, Tuple4<Integer, Integer, Double, Long> newDataPoint) {
+                        return newDataPoint.f2 - oldDataPoint.f2;
+                    }
+                }, carData.getType().createSerializer(env.getConfig())))
+                .maxBy(1);
+        if (params.has("output")) {
+            topSpeeds.writeAsText(params.get("output"));
+        } else {
+            System.out.println("Printing result to stdout. Use --output to specify output path.");
+            topSpeeds.print();
+        }
+
+        env.execute("CarTopSpeedWindowing");
+    }
+
+    private static class CarSource implements SourceFunction<Tuple4<Integer, Integer, Double, Long>> {
+
+        private static final long serialVersionUID = 1L;
+        private Integer[] speed;
+        private Double[] distance;
+        private Random random = new Random();
+        private volatile boolean isRunning = true;
+
+        private CarSource(int numOfCars) {
+            speed = new Integer[numOfCars];
+            distance = new Double[numOfCars];
+            Arrays.fill(speed, 50);
+            Arrays.fill(distance, 0d);
+        }
+
+        @Override
+        public void run(SourceContext<Tuple4<Integer, Integer, Double, Long>> ctx) throws Exception {
+            while (isRunning) {
+                Thread.sleep(100);
+                for (int idx = 0; idx < speed.length; ++idx) {
+                    if (random.nextBoolean()) {
+                        speed[idx] = Math.min(100, speed[idx] + 5);
+                    } else {
+                        speed[idx] = Math.max(0, speed[idx] - 5);
+                    }
+                    distance[idx] += speed[idx] / 3.6d;
+                    ctx.collect(new Tuple4<>(idx, speed[idx], distance[idx], System.currentTimeMillis()));
+                }
+            }
+        }
+
+        @Override
+        public void cancel() {
+            isRunning = false;
+        }
+
+        public static CarSource create(int numOfCars) {
+            return new CarSource(numOfCars);
+        }
+    }
+
+    private static class ParseCarData extends RichMapFunction<String, Tuple4<Integer, Integer, Double, Long>> {
+
+        @Override
+        public Tuple4<Integer, Integer, Double, Long> map(String record) throws Exception {
+            String rawData = record.substring(1, record.length() - 1);
+            String[] data = rawData.split(",");
+            return new Tuple4<>(Integer.valueOf(data[0]), Integer.valueOf(data[1]), Double.valueOf(data[2]), Long.valueOf(data[3]));
+        }
+    }
+
+    private static class CarTimestamp extends AscendingTimestampExtractor<Tuple4<Integer, Integer, Double, Long>> {
+
+        @Override
+        public long extractAscendingTimestamp(Tuple4<Integer, Integer, Double, Long> element) {
+            return element.f3;
+        }
+    }
+
+}

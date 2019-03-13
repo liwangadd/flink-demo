@@ -1,4 +1,4 @@
-package cn.windylee.flink;
+package cn.windylee.flink.trigger;
 
 import org.apache.flink.api.common.functions.FilterFunction;
 import org.apache.flink.api.common.functions.FlatMapFunction;
